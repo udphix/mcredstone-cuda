@@ -1,0 +1,29 @@
+# Build artefacts
+build/
+*.o
+*.obj
+*.exe
+*.dll
+*.lib
+*.exp
+*.pdb
+*.so
+*.dylib
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Simulator output
+*.rsschem.out
+dump_*.txt

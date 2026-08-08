@@ -1,0 +1,6 @@
+# Normalize text files to LF in the repository; check out native on Windows.
+* text=auto
+
+# Schematics are gzipped NBT — never touch them.
+*.schem binary
+*.rsschem binary
