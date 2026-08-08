@@ -89,8 +89,13 @@ static const int DIR_DZ[] = {  0,  0, -1,  1,  0,  0,  0 };
 /* ── Block State Encoding ─────────────────────────────────────────────────
  * The 16-bit `state` field is interpreted differently per block type:
  *
- * REPEATER:   [delay:2][locked:1][powered:1][unused:12]
- * COMPARATOR: [mode:1][output:4][unused:11]  (mode: 0=compare, 1=subtract)
+ * REPEATER:   [delay:4 (bits 0-3)][pending output:4 (bits 4-7)][unused:8]
+ * COMPARATOR: [mode:1 (bit 0)][unused:3][pending output:4 (bits 4-7)][unused:8]
+ *             mode: 0 = compare, 1 = subtract. Pending output is the level the
+ *             component will latch when its scheduled tile tick fires; both
+ *             components share the bits 4-7 layout so the tick handler is
+ *             uniform. For the repeater it is only ever 0 or 15; for the
+ *             comparator it is a real 0-15 level.
  * PISTON:     [extended:1][sticky:1][unused:14]
  * DUST:       [connections:8][unused:8]  (NSEW up/down connectivity)
  *

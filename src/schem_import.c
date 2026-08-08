@@ -271,6 +271,17 @@ static BlockMapping map_block_state(const char* block_state) {
             const uint8_t opposite[] = { 1, 0, 3, 2, 5, 4, 6 };
             uint8_t mc_facing = parse_facing(props);
             m.facing = opposite[mc_facing < 7 ? mc_facing : 6];
+
+            /* mode=compare|subtract → state bit 0. */
+            if (strstr(props, "mode=subtract") != NULL) m.state |= 0x1;
+
+            /* MC only stores a boolean `powered`, not the output level. A lit
+             * comparator imports as 15; the first tile tick recomputes the
+             * real level from its inputs. */
+            int powered = prop_bool(props, "powered");
+            m.has_override = 1;
+            m.ov_signal = powered ? 15 : 0;
+            m.ov_strong = powered ? 1 : 0;
         }
     }
     else if (strncmp(name, "lever", 5) == 0) {

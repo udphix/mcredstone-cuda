@@ -164,8 +164,16 @@ reimplementation. Known differences:
 - **Dust "dot" mode is not modelled.** Isolated dust always auto-crosses.
   Tracking real dot mode needs a per-dust flag imported from the schematic
   palette.
-- **Comparators are declared but behave as repeaters.** No compare/subtract
-  modes, no container reading.
+- **Comparators do not read containers.** Compare and subtract modes, side
+  inputs and level-preserving output all work (`tests/test_comparator.py`), but
+  there are no containers in this simulator, so a comparator behind a chest
+  measures 0 instead of its fill level.
+- **Comparator behaviour is not golden-verified.** Unlike dust, torches and
+  repeaters — which are replayed against circuits exported from the game under
+  `schematics/golden/` — the comparator is implemented from the documented
+  Minecraft rules and checked against hand-built expectations. If you have a
+  comparator circuit built in Minecraft, exporting it as a golden would close
+  the gap; that is the standard the rest of the simulator is held to.
 - **Pistons, observers, rails and note blocks are stubs.** The block IDs and
   quasi-connectivity plumbing exist; the behaviour does not.
 
@@ -173,6 +181,8 @@ reimplementation. Known differences:
 
 - `redstone-test` — 72 unit tests on individual components and rules.
 - `tests/test_batch_equivalence.py` — `WorldBatch` vs `World`, bit-exact.
+- `tests/test_comparator.py` — compare/subtract modes, side inputs, level
+  preservation, and the same scenes run through both launch shapes.
 - `tests/golden_runner.py` — replays circuits exported from Minecraft under
   `schematics/golden/` and fails on any divergence.
 - `tests/validate_xor_truth.py` — runs every golden XOR through all four input

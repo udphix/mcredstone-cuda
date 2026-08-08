@@ -147,6 +147,85 @@ __device__ static inline int comp_repeater_is_locked(
     return 0;
 }
 
+/* ── Comparator input levels ──────────────────────────────────────────────
+ * MC reads a comparator's rear and its two sides differently
+ * (ComparatorBlock.getInputSignal vs DiodeBlock.getAlternateSignal):
+ *
+ *   rear  — the general signal getter, so a strongly-powered conductor counts.
+ *   sides — only "alternate inputs", i.e. real signal sources. A plain solid
+ *           block carrying strong power does NOT feed a comparator's side.
+ *
+ * `into` is the direction from the neighbour back toward the comparator, so a
+ * repeater/comparator feeds us only when its facing equals `into`.
+ *
+ * NOT MODELLED: container fullness (no containers exist in this simulator), so
+ * a comparator behind a chest reads 0 rather than its fill level.
+ * ═══════════════════════════════════════════════════════════════════════ */
+__device__ static inline int comp_comparator_level(
+    const Block* nb, int into, int sides_only
+) {
+    switch (nb->type) {
+    case BLOCK_REDSTONE_DUST:  return (int)nb->signal;
+    case BLOCK_REDSTONE_BLOCK: return 15;
+    case BLOCK_LEVER:
+    case BLOCK_BUTTON:         return (nb->flags & BLOCK_FLAG_POWERED) ? 15 : 0;
+    case BLOCK_REDSTONE_TORCH: return nb->signal > 0 ? 15 : 0;
+    case BLOCK_REPEATER:
+    case BLOCK_COMPARATOR:     return ((int)nb->facing == into) ? (int)nb->signal : 0;
+    case BLOCK_SOLID:
+    case BLOCK_LAMP:
+        if (sides_only) return 0;
+        return (nb->flags & BLOCK_FLAG_STRONG_POWER) ? (int)nb->signal : 0;
+    default:                   return 0;
+    }
+}
+
+/* Output a comparator should be driving right now.
+ *   compare  mode: rear if rear >= max(sides), else 0
+ *   subtract mode: max(0, rear - max(sides)) */
+__device__ static inline int comp_get_comparator_output(
+    const Block* blocks,
+    int x, int y, int z,
+    int facing, int mode_subtract,
+    int sx, int sy, int sz
+) {
+    int back = comp_dir_opposite(facing);
+    Block rear = comp_get_block(blocks,
+                                x + comp_dir_dx(back),
+                                y + comp_dir_dy(back),
+                                z + comp_dir_dz(back), sx, sy, sz);
+    /* Direction from the rear neighbour back to us is `facing`. */
+    int rear_level = comp_comparator_level(&rear, facing, 0);
+
+    /* Comparators are horizontal in MC; a vertical facing has no well-defined
+     * sides, so treat it as unpowered rather than guessing. */
+    if (facing == DIR_UP || facing == DIR_DOWN || facing == DIR_NONE) return 0;
+
+    int sides[2];
+    if (facing == DIR_NORTH || facing == DIR_SOUTH) {
+        sides[0] = DIR_EAST;  sides[1] = DIR_WEST;
+    } else {
+        sides[0] = DIR_NORTH; sides[1] = DIR_SOUTH;
+    }
+
+    int side_level = 0;
+    for (int i = 0; i < 2; i++) {
+        int sd = sides[i];
+        Block nb = comp_get_block(blocks,
+                                  x + comp_dir_dx(sd),
+                                  y + comp_dir_dy(sd),
+                                  z + comp_dir_dz(sd), sx, sy, sz);
+        int lv = comp_comparator_level(&nb, comp_dir_opposite(sd), 1);
+        if (lv > side_level) side_level = lv;
+    }
+
+    if (mode_subtract) {
+        int out = rear_level - side_level;
+        return out > 0 ? out : 0;
+    }
+    return (rear_level >= side_level) ? rear_level : 0;
+}
+
 /* ═══════════════════════════════════════════════════════════════════════
  * PHASE 1 (per cell): Process Tick Events
  *
@@ -185,6 +264,21 @@ __device__ static inline void component_process_event_cell(
     /* ── Repeater: apply pending output ───────────────────────────── */
     if (block.type == BLOCK_REPEATER) {
         /* Pending output is stored in state bits 4-7 */
+        uint8_t pending = (block.state >> 4) & 0xF;
+        blocks[idx].signal = pending;
+        if (pending > 0) {
+            blocks[idx].flags = BLOCK_FLAG_POWERED | BLOCK_FLAG_STRONG_POWER;
+        } else {
+            blocks[idx].flags = 0;
+        }
+        blocks[idx].flags &= ~BLOCK_FLAG_SCHEDULED;
+        blocks[idx].tick_scheduled = 0;
+    }
+
+    /* ── Comparator: apply pending output ─────────────────────────── */
+    if (block.type == BLOCK_COMPARATOR) {
+        /* Same layout as the repeater: pending output in state bits 4-7.
+         * Unlike the repeater this is a real level, not just 0/15. */
         uint8_t pending = (block.state >> 4) & 0xF;
         blocks[idx].signal = pending;
         if (pending > 0) {
@@ -273,6 +367,27 @@ __device__ static inline void component_detect_change_cell(
             /* Store pending output in state bits 4-7 */
             blocks[idx].state = (block.state & 0xF) |
                                 ((has_input ? 15 : 0) << 4);
+            blocks[idx].tick_scheduled = fire_tick;
+            blocks[idx].flags |= BLOCK_FLAG_SCHEDULED;
+        }
+    }
+
+    /* ── Comparator: check if the computed output changed ──────────── */
+    if (block.type == BLOCK_COMPARATOR) {
+        if (block.flags & BLOCK_FLAG_SCHEDULED) return;
+
+        /* state bit 0 = mode (0 compare, 1 subtract). Comparators are never
+         * locked — that is a repeater-only mechanic. */
+        int mode_subtract = block.state & 0x1;
+        int want = comp_get_comparator_output(blocks, x, y, z, block.facing,
+                                              mode_subtract,
+                                              size_x, size_y, size_z);
+
+        if (want != (int)block.signal) {
+            /* Comparators are fixed at 1 redstone tick = 2 game ticks. */
+            uint16_t fire_tick = (uint16_t)((current_tick + 2) & 0xFFFF);
+            blocks[idx].state = (uint16_t)((block.state & 0x000F) |
+                                           ((want & 0xF) << 4));
             blocks[idx].tick_scheduled = fire_tick;
             blocks[idx].flags |= BLOCK_FLAG_SCHEDULED;
         }
