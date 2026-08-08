@@ -61,6 +61,10 @@ World* world_create(int size_x, int size_y, int size_z) {
     CUDA_CHECK(cudaMemset(world->d_blocks_a, 0, buffer_size));
     CUDA_CHECK(cudaMemset(world->d_blocks_b, 0, buffer_size));
 
+    /* Scratch flag the relaxation loop reads to stop early. */
+    CUDA_CHECK(cudaMalloc(&world->d_changed, sizeof(int32_t)));
+    CUDA_CHECK(cudaMemset(world->d_changed, 0, sizeof(int32_t)));
+
     /* Set buffer pointers */
     world->d_current = world->d_blocks_a;
     world->d_next    = world->d_blocks_b;
@@ -83,6 +87,7 @@ void world_destroy(World* world) {
 
     if (world->d_blocks_a)        cudaFree(world->d_blocks_a);
     if (world->d_blocks_b)        cudaFree(world->d_blocks_b);
+    if (world->d_changed)         cudaFree(world->d_changed);
     if (world->d_probe_positions) cudaFree(world->d_probe_positions);
     if (world->d_probe_results)   cudaFree(world->d_probe_results);
     if (world->h_blocks)          free(world->h_blocks);
@@ -232,14 +237,24 @@ void world_tick(World* world) {
      * Components are inert here: signal_update_cell copies them through
      * unchanged, so re-running the pass is idempotent for them. */
     for (int k = 0; k < DUST_RELAX_PASSES; k++) {
+        cudaMemset(world->d_changed, 0, sizeof(int32_t));
         kernel_propagate_signal(
             world->d_current,
             world->d_next,
+            world->d_changed,
             world->size_x,
             world->size_y,
             world->size_z
         );
         world_swap_buffers(world);
+
+        /* Stop as soon as the field settles. Typical circuits need 2-4
+         * passes, so running all 16 would cost several times more than the
+         * tick actually requires. */
+        int32_t changed = 0;
+        CUDA_CHECK(cudaMemcpy(&changed, world->d_changed, sizeof(int32_t),
+                              cudaMemcpyDeviceToHost));
+        if (!changed) break;
     }
 
     /* 3. BLOCK EVENTS — piston extensions/retractions, block movement.

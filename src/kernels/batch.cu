@@ -51,15 +51,20 @@ __global__ void kernel_batch_propagate(
     const Block* __restrict__ src,
     Block* __restrict__ dst,
     const uint8_t* __restrict__ done,
-    int32_t* __restrict__ changed,
+    const uint8_t* __restrict__ relaxed,
+    int32_t* __restrict__ pass_changed,
     int cells, int size_x, int size_y, int size_z
 ) {
     int inst = blockIdx.y;
     int i = blockIdx.x * blockDim.x + threadIdx.x;
 
-    /* No early return before the ballot below — every thread of the warp must
+    /* An instance whose wire field already settled earlier in this tick has
+     * nothing left to compute: the remaining passes would reproduce the same
+     * state. It still has to copy, because the buffers swap every pass.
+     *
+     * No early return before the ballot below — every thread of the warp must
      * reach __ballot_sync. */
-    int active = (i < cells) && !done[inst];
+    int active = (i < cells) && !done[inst] && !relaxed[inst];
     int diff = 0;
 
     if (i < cells) {
@@ -77,18 +82,38 @@ __global__ void kernel_batch_propagate(
         }
     }
 
-    /* A relaxation pass that changed nothing means the wire field has reached
-     * its fixed point. Accumulated across the passes of one tick, this is also
-     * the answer to "did this tick change anything", which drives convergence.
-     * Warp-aggregated so at most cells/32 atomics land per instance. */
+    /* Warp-aggregated so at most cells/32 atomics land per instance. */
     unsigned bd = __ballot_sync(0xFFFFFFFFu, diff);
-    if ((threadIdx.x & 31u) == 0u && bd) atomicOr(&changed[inst], 1);
+    if ((threadIdx.x & 31u) == 0u && bd) atomicOr(&pass_changed[inst], 1);
 }
 
-/* Phase 4: schedule component events (in place on d_next) + convergence
- * detection. `cur` is d_current, i.e. the state this tick started from
- * (post tile-tick), so the comparison answers "did this tick change
- * anything at all". */
+/* Between relaxation passes: a pass that changed nothing means this instance's
+ * wire field has reached its fixed point, so every later pass in this tick can
+ * skip it. Folding per-pass changes into the per-tick flag also keeps the
+ * "did this tick change anything" answer that drives convergence. */
+__global__ void kernel_batch_fold_relax(
+    uint8_t* __restrict__ relaxed,
+    int32_t* __restrict__ changed,
+    const int32_t* __restrict__ pass_changed,
+    const uint8_t* __restrict__ done,
+    int32_t* __restrict__ any_active,
+    int n_worlds
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_worlds) return;
+    if (pass_changed[i]) changed[i] = 1;
+    else                 relaxed[i] = 1;
+
+    /* Whether ANY instance still needs another pass. The host reads this to
+     * leave the loop early, which matters more than the per-instance skip: a
+     * skipped instance still copies its slab, and at batch 2048 that copy
+     * traffic dominates the pass. Ending the loop avoids both. */
+    if (!relaxed[i] && !done[i]) atomicOr(any_active, 1);
+}
+
+/* Phase 4: schedule component events (in place) + its share of convergence
+ * detection. The relaxation loop reports its own changes, so this only has to
+ * report the ones scheduling itself introduces. */
 __global__ void kernel_batch_detect(
     Block* __restrict__ next,
     const uint32_t* __restrict__ ticks,
@@ -275,6 +300,10 @@ WorldBatch* world_batch_create(int n_worlds, int size_x, int size_y, int size_z)
     err = err ? err : cudaMalloc(&b->d_done,    (size_t)n_worlds * sizeof(uint8_t));
     err = err ? err : cudaMalloc(&b->d_changed, (size_t)n_worlds * sizeof(int32_t));
     err = err ? err : cudaMalloc(&b->d_sched,   (size_t)n_worlds * sizeof(int32_t));
+    err = err ? err : cudaMalloc(&b->d_pass_changed,
+                                 (size_t)n_worlds * sizeof(int32_t));
+    err = err ? err : cudaMalloc(&b->d_relaxed, (size_t)n_worlds * sizeof(uint8_t));
+    err = err ? err : cudaMalloc(&b->d_any_active, sizeof(int32_t));
     if (err != cudaSuccess) {
         fprintf(stderr, "[Batch] device allocation failed (%zu bytes x2): %s\n",
                 bytes, cudaGetErrorString(err));
@@ -301,6 +330,9 @@ void world_batch_destroy(WorldBatch* b) {
     if (b->d_done)            cudaFree(b->d_done);
     if (b->d_changed)         cudaFree(b->d_changed);
     if (b->d_sched)           cudaFree(b->d_sched);
+    if (b->d_pass_changed)    cudaFree(b->d_pass_changed);
+    if (b->d_relaxed)         cudaFree(b->d_relaxed);
+    if (b->d_any_active)      cudaFree(b->d_any_active);
     if (b->d_probe_positions) cudaFree(b->d_probe_positions);
     if (b->d_probe_results)   cudaFree(b->d_probe_results);
     if (b->d_lever_positions) cudaFree(b->d_lever_positions);
@@ -447,14 +479,32 @@ static void batch_run_ticks(WorldBatch* b, int n) {
          * network inside the disturbing tick, and 16 passes is a hard bound
          * on reaching that fixed point. Each pass swaps the buffers, so the
          * relaxed state ends up in d_current. */
+        cudaMemsetAsync(b->d_relaxed, 0, (size_t)b->n_worlds * sizeof(uint8_t));
+
         for (int k = 0; k < DUST_RELAX_PASSES; k++) {
+            cudaMemsetAsync(b->d_pass_changed, 0, flag_bytes);
+
             kernel_batch_propagate<<<cell_grid, cell_block>>>(
-                b->d_current, b->d_next, b->d_done, b->d_changed,
+                b->d_current, b->d_next, b->d_done, b->d_relaxed,
+                b->d_pass_changed,
                 b->cells, b->size_x, b->size_y, b->size_z);
+
+            cudaMemsetAsync(b->d_any_active, 0, sizeof(int32_t));
+            kernel_batch_fold_relax<<<fin_grid, THREADS_PER_BLOCK>>>(
+                b->d_relaxed, b->d_changed, b->d_pass_changed, b->d_done,
+                b->d_any_active, b->n_worlds);
 
             Block* tmp = b->d_current;
             b->d_current = b->d_next;
             b->d_next = tmp;
+
+            /* One 4-byte readback per pass. It serialises the stream, but a
+             * typical circuit settles in 2-4 passes, so it buys back a dozen
+             * full-batch passes worth of memory traffic. */
+            int32_t any = 0;
+            cudaMemcpy(&any, b->d_any_active, sizeof(int32_t),
+                       cudaMemcpyDeviceToHost);
+            if (!any) break;
         }
 
         /* 3. BLOCK EVENTS — TODO v0.5 (piston movement) */

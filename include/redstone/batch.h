@@ -90,6 +90,9 @@ typedef struct {
     uint8_t*  h_done;
     int32_t*  d_changed;     /* scratch: state changed this tick */
     int32_t*  d_sched;       /* scratch: instance holds a pending tile tick */
+    int32_t*  d_pass_changed;/* scratch: this relaxation pass changed something */
+    uint8_t*  d_relaxed;     /* scratch: wire field settled, skip further passes */
+    int32_t*  d_any_active;  /* scratch: any instance still relaxing (1 int) */
 
     int dirty;               /* host mirror has edits not yet on GPU */
 

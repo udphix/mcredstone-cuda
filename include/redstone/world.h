@@ -40,6 +40,7 @@ typedef struct {
     /* GPU buffers (double buffered) */
     Block* d_blocks_a;
     Block* d_blocks_b;
+    int32_t* d_changed;      /* scratch: last relaxation pass altered a cell */
     Block* d_current;
     Block* d_next;
 

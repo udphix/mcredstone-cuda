@@ -12,9 +12,13 @@ extern "C" {
  * Direction-aware: torch doesn't power attached block, repeater only
  * powers block in front.
  */
+/* `d_changed` (may not be NULL) receives 1 if this pass altered any cell.
+ * The caller uses it to stop the relaxation loop as soon as the wire field
+ * has settled, instead of always running DUST_RELAX_PASSES. */
 void kernel_propagate_signal(
     const Block* d_src,
     Block* d_dst,
+    int32_t* d_changed,
     int size_x, int size_y, int size_z
 );
 

@@ -12,21 +12,22 @@ per launch brings that down to **0.32 µs per tick per world**:
 
 | | µs/tick/world | circuits/s | speedup |
 | --- | --- | --- | --- |
-| `World` (one per launch) | 683.4 | 37 | 1× |
-| `WorldBatch`, batch 128 | 3.182 | 7,858 | 215× |
-| `WorldBatch`, batch 512 | 2.854 | 8,758 | 239× |
-| `WorldBatch`, batch 2048 | 2.764 | 9,045 | **247×** |
+| `World` (one per launch) | 130.67 | 191 | 1× |
+| `WorldBatch`, batch 128 | 0.912 | 27,408 | 143× |
+| `WorldBatch`, batch 512 | 0.459 | 54,444 | 285× |
+| `WorldBatch`, batch 2048 | 0.277 | 90,224 | **472×** |
 
 Reproduce with `python tools/bench_batch.py`; the numbers are from an RTX 3060 Ti.
 
-**A tick is not a cheap unit here.** Each one relaxes the wire field to its
-fixed point (see below), so it costs up to 16 propagation passes — but it also
-does all the work a Minecraft tick does, which means you need far fewer of
-them. The golden circuits settle in **2 ticks**
-(`python tests/golden_runner.py --ticks 2` passes 21/21), and
-`tick_until_stable` converges a batch of routing circuits in 4. If you are
-porting code that ran 40 ticks per truth-table row, that budget is now roughly
-an order of magnitude larger than it needs to be.
+**A tick here does everything a Minecraft tick does.** It relaxes the whole
+wire field to its fixed point rather than nudging signal one cell (see below),
+so you need far fewer ticks than a naive relaxation would demand. The golden
+circuits settle in **2 ticks** — `python tests/golden_runner.py --ticks 2`
+passes 21/21 — and `tick_until_stable` converges a batch of routing circuits in
+4, which is where the real win shows up: a 2048-batch settles in 2.4 ms instead
+of the 22.9 ms a blind 40-tick budget costs. If you are porting code that ran 40
+ticks per truth-table row, that budget is about an order of magnitude larger
+than it needs to be.
 
 If you want to search a large space of redstone circuits — brute force,
 reinforcement learning, genetic search, automated verification — that ratio is
