@@ -51,18 +51,38 @@ __global__ void kernel_batch_propagate(
     const Block* __restrict__ src,
     Block* __restrict__ dst,
     const uint8_t* __restrict__ done,
+    int32_t* __restrict__ changed,
     int cells, int size_x, int size_y, int size_z
 ) {
     int inst = blockIdx.y;
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= cells) return;
 
-    const Block* s = src + (size_t)inst * cells;
-    Block*       d = dst + (size_t)inst * cells;
+    /* No early return before the ballot below — every thread of the warp must
+     * reach __ballot_sync. */
+    int active = (i < cells) && !done[inst];
+    int diff = 0;
 
-    if (done[inst]) { d[i] = s[i]; return; }
+    if (i < cells) {
+        const Block* s = src + (size_t)inst * cells;
+        Block*       d = dst + (size_t)inst * cells;
 
-    signal_update_cell(s, d, i, size_x, size_y, size_z);
+        if (!active) {
+            d[i] = s[i];
+        } else {
+            signal_update_cell(s, d, i, size_x, size_y, size_z);
+            Block a = d[i], b = s[i];
+            diff = (a.type   != b.type)   | (a.signal != b.signal) |
+                   (a.facing != b.facing) | (a.flags  != b.flags)  |
+                   (a.state  != b.state)  | (a.tick_scheduled != b.tick_scheduled);
+        }
+    }
+
+    /* A relaxation pass that changed nothing means the wire field has reached
+     * its fixed point. Accumulated across the passes of one tick, this is also
+     * the answer to "did this tick change anything", which drives convergence.
+     * Warp-aggregated so at most cells/32 atomics land per instance. */
+    unsigned bd = __ballot_sync(0xFFFFFFFFu, diff);
+    if ((threadIdx.x & 31u) == 0u && bd) atomicOr(&changed[inst], 1);
 }
 
 /* Phase 4: schedule component events (in place on d_next) + convergence
@@ -71,7 +91,6 @@ __global__ void kernel_batch_propagate(
  * anything at all". */
 __global__ void kernel_batch_detect(
     Block* __restrict__ next,
-    const Block* __restrict__ cur,
     const uint32_t* __restrict__ ticks,
     const uint8_t* __restrict__ done,
     int32_t* __restrict__ changed,
@@ -88,10 +107,16 @@ __global__ void kernel_batch_detect(
 
     if (active) {
         Block* n = next + (size_t)inst * cells;
+
+        /* Compare against this cell's own pre-scheduling state rather than
+         * against the buffer the tick started from: the relaxation loop has
+         * already consumed and swapped that buffer. The propagation passes
+         * report their own changes, so the union still answers "did this tick
+         * change anything". */
+        Block b = n[i];
         component_detect_change_cell(n, i, ticks[inst], size_x, size_y, size_z);
 
         Block a = n[i];
-        Block b = cur[(size_t)inst * cells + i];
         diff = (a.type   != b.type)   | (a.signal != b.signal) |
                (a.facing != b.facing) | (a.flags  != b.flags)  |
                (a.state  != b.state)  | (a.tick_scheduled != b.tick_scheduled);
@@ -417,26 +442,32 @@ static void batch_run_ticks(WorldBatch* b, int n) {
             b->d_current, b->d_ticks, b->d_done,
             b->cells, b->size_x, b->size_y, b->size_z);
 
-        /* 2. BLOCK UPDATES */
-        kernel_batch_propagate<<<cell_grid, cell_block>>>(
-            b->d_current, b->d_next, b->d_done,
-            b->cells, b->size_x, b->size_y, b->size_z);
+        /* 2. BLOCK UPDATES — relax the wire field to its fixed point.
+         * See DUST_RELAX_PASSES in kernels.h: Minecraft settles a whole dust
+         * network inside the disturbing tick, and 16 passes is a hard bound
+         * on reaching that fixed point. Each pass swaps the buffers, so the
+         * relaxed state ends up in d_current. */
+        for (int k = 0; k < DUST_RELAX_PASSES; k++) {
+            kernel_batch_propagate<<<cell_grid, cell_block>>>(
+                b->d_current, b->d_next, b->d_done, b->d_changed,
+                b->cells, b->size_x, b->size_y, b->size_z);
+
+            Block* tmp = b->d_current;
+            b->d_current = b->d_next;
+            b->d_next = tmp;
+        }
 
         /* 3. BLOCK EVENTS — TODO v0.5 (piston movement) */
 
-        /* 4. SCHEDULING (+ convergence detection) */
+        /* 4. SCHEDULING (+ its own share of convergence detection) */
         kernel_batch_detect<<<cell_grid, cell_block>>>(
-            b->d_next, b->d_current, b->d_ticks, b->d_done,
+            b->d_current, b->d_ticks, b->d_done,
             b->d_changed, b->d_sched,
             b->cells, b->size_x, b->size_y, b->size_z);
 
         /* 5. advance clocks / latch fixed points */
         kernel_batch_finalize<<<fin_grid, THREADS_PER_BLOCK>>>(
             b->d_ticks, b->d_done, b->d_changed, b->d_sched, b->n_worlds);
-
-        Block* tmp = b->d_current;
-        b->d_current = b->d_next;
-        b->d_next = tmp;
     }
 
     batch_report("tick");

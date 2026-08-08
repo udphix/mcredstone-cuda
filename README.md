@@ -12,15 +12,21 @@ per launch brings that down to **0.32 µs per tick per world**:
 
 | | µs/tick/world | circuits/s | speedup |
 | --- | --- | --- | --- |
-| `World` (one per launch) | 92.68 | 270 | 1× |
-| `WorldBatch`, batch 128 | 0.416 | 60,043 | 223× |
-| `WorldBatch`, batch 512 | 0.326 | 76,782 | 285× |
-| `WorldBatch`, batch 2048 | 0.320 | 78,124 | **290×** |
+| `World` (one per launch) | 683.4 | 37 | 1× |
+| `WorldBatch`, batch 128 | 3.182 | 7,858 | 215× |
+| `WorldBatch`, batch 512 | 2.854 | 8,758 | 239× |
+| `WorldBatch`, batch 2048 | 2.764 | 9,045 | **247×** |
 
-End-to-end truth-table evaluation — set the levers, run to convergence, read the
-lamp, for every input row — comes out at **319×** (`World` 7547 µs/circuit vs
-`WorldBatch[512]` 23.7 µs/circuit). Reproduce with `python tools/bench_batch.py`;
-the numbers above are from an RTX 3060 Ti.
+Reproduce with `python tools/bench_batch.py`; the numbers are from an RTX 3060 Ti.
+
+**A tick is not a cheap unit here.** Each one relaxes the wire field to its
+fixed point (see below), so it costs up to 16 propagation passes — but it also
+does all the work a Minecraft tick does, which means you need far fewer of
+them. The golden circuits settle in **2 ticks**
+(`python tests/golden_runner.py --ticks 2` passes 21/21), and
+`tick_until_stable` converges a batch of routing circuits in 4. If you are
+porting code that ran 40 ticks per truth-table row, that budget is now roughly
+an order of magnitude larger than it needs to be.
 
 If you want to search a large space of redstone circuits — brute force,
 reinforcement learning, genetic search, automated verification — that ratio is
@@ -127,10 +133,19 @@ state — a much better fit for a GPU.
 
 **The tick.** Each tick runs Minecraft's four phases in order:
 
-1. **Tile ticks** — scheduled events fire (torch toggles, repeater output).
-2. **Block updates** — signal propagation, double-buffered (read A, write B).
+1. **Tile ticks** — scheduled events fire (torch toggles, repeater/comparator
+   output).
+2. **Block updates** — signal propagation, double-buffered (read A, write B),
+   repeated until the wire field stops changing.
 3. **Block events** — piston movement (not yet implemented).
 4. **Scheduling** — detect component input changes, schedule future tile ticks.
+
+Phase 2 iterates because Minecraft settles a whole dust network inside the tick
+that disturbed it; only components carry delay. One pass moves signal exactly
+one cell, and dust loses one level per cell from a maximum of 15, so 16 passes
+is a *hard bound* on reaching the fixed point — it does not depend on world
+size, wire length or topology. A 12-dust wire therefore lights its lamp on the
+tick the lever flips, not twelve ticks later.
 
 **Signal rules.** The core mirrors Minecraft's two signal queries: `getSignal`
 (weak power emitted toward a direction) and `getDirectSignal` (strong power
@@ -151,12 +166,6 @@ This is faithful enough to run circuits built in real Minecraft — the test sui
 includes XOR gates exported from the game — but it is not a bit-perfect
 reimplementation. Known differences:
 
-- **Wire propagation is iterative, not instantaneous.** One tick is one
-  relaxation pass over the grid, so a signal advances one dust cell per tick.
-  Minecraft propagates dust instantly within a tick. Final states and
-  component delays (torch 2 ticks, repeater 1–4) are faithful; wire latency is
-  not. In practice you run a circuit to its fixed point and read the result,
-  which is what `tick_until_stable` is for.
 - **Lamps and solid blocks read power differently.** Lamps apply the
   conductor relay; plain solid blocks don't. This is not derived from Minecraft's
   code — it is calibrated against transient states in the exported reference

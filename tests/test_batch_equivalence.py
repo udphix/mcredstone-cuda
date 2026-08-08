@@ -354,11 +354,17 @@ def test_tick_until_stable(seed: int) -> None:
               used == 120, f"used {used}")
 
         # And the clock must still be *running*, not frozen at a fixed point.
-        s1 = b.get_all_blocks()[15]["signal"].copy()
-        b.tick(20)
-        s2 = b.get_all_blocks()[15]["signal"]
+        # Sample consecutive ticks rather than comparing against a single
+        # later snapshot: this torch clock has a period of 4, so any probe at
+        # a multiple of the period lands on the same phase and would look
+        # frozen even though it is running.
+        frames = []
+        for _ in range(5):
+            frames.append(b.get_all_blocks()[15]["signal"].copy())
+            b.tick(1)
         check("oscillating instance keeps changing state",
-              not np.array_equal(s1, s2))
+              any(not np.array_equal(frames[0], f) for f in frames[1:]),
+              f"all {len(frames)} consecutive frames identical")
 
     # ── `done` must never be latched while a tile tick is pending ───
     rand = [random_circuit(rng) for _ in range(32)]

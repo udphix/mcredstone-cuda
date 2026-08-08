@@ -176,6 +176,19 @@ typedef struct {
 /* Max tick events per tick (GPU buffer size) */
 #define MAX_TICK_EVENTS 65536
 
+/* ── Wire relaxation bound ────────────────────────────────────────────────
+ * Minecraft settles a whole dust network within the tick that disturbed it,
+ * so a tick runs the propagation pass repeatedly instead of once. One pass
+ * moves signal exactly one cell, and dust loses one level per cell from a
+ * maximum of 15, so nothing can still be changing after 15 passes. 16 is
+ * therefore a hard bound on reaching the fixed point — independent of world
+ * size, wire length and circuit topology.
+ *
+ * Only components carry real delay (torch 2 ticks, repeater 2-8, comparator
+ * 2); those are driven by the tile-tick phases, not by this loop.
+ */
+#define DUST_RELAX_PASSES 16
+
 #ifdef __cplusplus
 }
 #endif

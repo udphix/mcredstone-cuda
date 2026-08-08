@@ -215,33 +215,46 @@ void world_tick(World* world) {
         world->size_z
     );
 
-    /* 2. BLOCK UPDATES — propagate redstone signal through the world.
-     * Reads d_current, writes d_next. Double-buffered to prevent
-     * GPU race conditions. Includes quasi-connectivity checks for
-     * pistons/dispensers/droppers. */
-    kernel_propagate_signal(
-        world->d_current,
-        world->d_next,
-        world->size_x,
-        world->size_y,
-        world->size_z
-    );
+    /* 2. BLOCK UPDATES — relax the wire field to its fixed point.
+     *
+     * Minecraft propagates dust across a whole wire network within the tick
+     * that disturbed it; only components (torch, repeater, comparator) carry
+     * a delay. One pass of the kernel moves signal exactly one cell, so a
+     * single pass per tick would give wires a latency Minecraft does not
+     * have. Iterating to the fixed point here restores that.
+     *
+     * DUST_RELAX_PASSES is a hard bound, not a heuristic: dust loses one
+     * level per cell from a maximum of 15, so no cell can still be changing
+     * after 15 passes — independent of world size. Each pass reads
+     * d_current and writes d_next, then swaps, so the relaxed field ends up
+     * in d_current.
+     *
+     * Components are inert here: signal_update_cell copies them through
+     * unchanged, so re-running the pass is idempotent for them. */
+    for (int k = 0; k < DUST_RELAX_PASSES; k++) {
+        kernel_propagate_signal(
+            world->d_current,
+            world->d_next,
+            world->size_x,
+            world->size_y,
+            world->size_z
+        );
+        world_swap_buffers(world);
+    }
 
     /* 3. BLOCK EVENTS — piston extensions/retractions, block movement.
      * TODO v0.5: kernel_move_blocks() */
 
     /* 4. SCHEDULING — detect component input changes after propagation,
-     * schedule future tile ticks. Modifies d_next in-place. */
+     * schedule future tile ticks. The relaxation loop already left the new
+     * state in d_current, so this runs in place on it. */
     kernel_detect_component_changes(
-        world->d_next,
+        world->d_current,
         world->current_tick,
         world->size_x,
         world->size_y,
         world->size_z
     );
-
-    /* Swap buffers: d_next becomes d_current for next tick */
-    world_swap_buffers(world);
 
     world->current_tick++;
 }
