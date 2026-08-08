@@ -11,17 +11,27 @@ Thin Python layer over the C/CUDA simulator using ctypes.
 
 ## Setup
 
-1. Build the native shared library:
+1. Build the native shared library (from the repo root):
 
    ```bash
-   cd build
-   cmake .. -DCMAKE_CUDA_ARCHITECTURES=86
-   cmake --build . --target redstone_sim --config Release
+   cmake -B build -DCMAKE_CUDA_ARCHITECTURES=86
+   cmake --build build --target redstone_sim --config Release
    ```
 
    This produces `build/Release/redstone_sim.dll`.
 
-2. From the repo root, run the smoke test:
+2. Install this package as editable:
+
+   ```bash
+   pip install -e bindings          # pip install -e "bindings[env]" for Gymnasium
+   ```
+
+   It must be **editable**. The package does not vendor the compiled library:
+   `_core.py` resolves `build/Release/redstone_sim.dll` relative to the
+   repository root, which only works while the package still lives inside the
+   repo. A regular install would need `$REDSTONE_SIM_DLL` set by hand.
+
+3. Run the smoke test:
 
    ```bash
    python bindings/smoke_test.py
@@ -30,7 +40,6 @@ Thin Python layer over the C/CUDA simulator using ctypes.
 ## Usage
 
 ```python
-import sys; sys.path.insert(0, "bindings")
 from redstone_sim import (
     World, BLOCK_LEVER, BLOCK_LAMP, BLOCK_REDSTONE_DUST, BLOCK_SOLID, DIR_DOWN,
 )

@@ -60,12 +60,19 @@ This produces, under `build/Release/`:
 
 ## Quick start (Python)
 
+Install the bindings as an editable package, so `import redstone_sim` works
+from any directory:
+
 ```bash
-pip install numpy
+pip install -e bindings          # add [env] for the Gymnasium wrapper
 ```
 
+The package deliberately does not vendor the compiled library — `_core.py`
+locates `build/Release/redstone_sim.dll` relative to this repository, which is
+why the install has to be editable. Build the CMake project first, or point
+`$REDSTONE_SIM_DLL` at the library yourself.
+
 ```python
-import sys; sys.path.insert(0, "bindings")
 from redstone_sim import (
     World, BLOCK_LEVER, BLOCK_LAMP, BLOCK_REDSTONE_DUST, BLOCK_SOLID, DIR_DOWN,
 )
